@@ -1,0 +1,164 @@
+# MIPS32 Processor Assembler
+OPCODES = {
+    # R-Type (Arithmetic & Logic)
+    'ADD'  : '000000', 'SUB'  : '000001', 'AND'  : '000010', 'OR'   : '000011',
+    'SLT'  : '000100', 'MUL'  : '000101', 'HLT'  : '111111',
+    # I-Type (Memory, Immediate, Branches)
+    'LW'   : '001000', 'SW'   : '001001', 'ADDI' : '001010', 'SUBI' : '001011',
+    'SLTI' : '001100', 'BNEQZ': '001101', 'BEQZ' : '001110',
+    # Dummy instruction
+    'NOP'  : "00000000000000000000000000000000",
+}
+
+REGISTERS = {f"R{i}": format(i, '05b') for i in range(32)}
+labels = {} # To store the labels and their addresses
+
+# To remove the comments in the code
+def read_file(file_name, code):
+    with open(file_name, 'r') as f:
+        for line in f:
+            # Strip whitespace and remove comments
+            clean_line = line.split('//')[0].strip().upper()
+            if clean_line: # Only append if not empty
+                code.append(clean_line)
+    return code
+
+# To replace the labels with ':' with the program counter
+def first_Pass(lines, instruction):
+    pc = 0
+    for line in lines:
+        # Split only on the first colon to prevent array errors
+        line_parts = line.split(':', 1) 
+        
+        if len(line_parts) == 2:
+            labels[line_parts[0].strip()] = pc # Store INT, not string
+            clean_inst = line_parts[1].replace(","," ").replace("("," ").replace(")"," ")
+            if clean_inst.strip():
+                instruction.append(" ".join(clean_inst.split()))
+                pc += 4 # Only increment if there is a real instruction!
+        else:
+            clean_inst = line_parts[0].replace(","," ").replace("("," ").replace(")"," ")
+            if clean_inst.strip():
+                instruction.append(" ".join(clean_inst.split()))
+                pc += 4 # Only increment if there is a real instruction!
+    return instruction
+
+# To repeat an instruction to avoid a hazard (Optional Pipeline Use)
+def second_Pass(instruction):
+    pipelined_instruction = []
+    for i in range(len(instruction) - 1):
+        pipelined_instruction.append(instruction[i])
+
+        part1 = instruction[i].split(" ")
+        part2 = instruction[i + 1].split(" ")
+
+        # Hazard logic
+        if len(part1) == 4 and len(part2) >= 3:
+            if part1[1] in part2[2:]:
+                pipelined_instruction.append("NOP")
+        elif len(part1) == 3 and len(part2) >= 3:
+            if part1[1] in part2[2:]:
+                pipelined_instruction.append("NOP")
+
+    pipelined_instruction.append(instruction[-1]) 
+    return pipelined_instruction
+
+# To convert the assembly code to machine code
+def r_Type(instruction, machine_code):
+    parts = instruction.split(" ")
+    opcode = OPCODES[parts[0]]
+    rd = REGISTERS[parts[1]] # Destination
+    rs = REGISTERS[parts[2]] # Source 1
+    rt = REGISTERS[parts[3]] # Source 2
+    machine_code.append(opcode + rs + rt + rd + ("0" * 11) + "\n")
+    return machine_code
+
+def HALT_Instruction(instruction, machine_code):
+    machine_code.append(OPCODES["HLT"] + ("0" * 26) + "\n")
+    return machine_code
+
+def i_Type_Arithmetic(instruction, machine_code):
+    parts = instruction.split(" ")
+    opcode = OPCODES[parts[0]]
+    rt = REGISTERS[parts[1]] # Destination
+    rs = REGISTERS[parts[2]] # Source
+    immediate = format(int(parts[3]) & 0xFFFF, '016b')
+    machine_code.append(opcode + rs + rt + immediate + "\n")
+    return machine_code
+
+def i_Type_Memory(instruction, machine_code):
+    parts = instruction.split(" ")
+    opcode = OPCODES[parts[0]]
+    rt = REGISTERS[parts[1]] # Destination
+    immediate = format(int(parts[2]) & 0xFFFF, '016b') # Offset
+    rs = REGISTERS[parts[3]] # Base Register
+    machine_code.append(opcode + rs + rt + immediate + "\n")
+    return machine_code
+
+def i_Type_Branch(instruction, machine_code, pc):
+    parts = instruction.split(" ")
+    opcode = OPCODES[parts[0]]
+    rs = REGISTERS[parts[1]]
+    rt = "00000"
+    target_addr = labels[parts[2]]
+
+    # Formula: Offset = (Target - (PC + 4)) / 4
+    offset_val = (target_addr - pc - 4) // 4
+    offset = format(offset_val & 0xFFFF, '016b')
+    machine_code.append(opcode + rs + rt + offset + "\n")
+    return machine_code
+
+# MAIN function
+def main(file_name):
+    global labels
+    labels.clear() # Clear labels on start so consecutive runs don't corrupt
+    
+    code = []
+    machine_code = []
+    instruction = []
+
+    code = read_file(file_name, code)
+    instruction = first_Pass(code, instruction)
+
+    # Enable this if you want hazard NOPs injected!
+    # instruction = second_Pass(instruction)
+
+    pc = 0
+    for i in range(len(instruction)):
+        parts = instruction[i].split(" ")
+        a = parts[0]
+
+        if a == "NOP":
+            machine_code.append(OPCODES["NOP"] + "\n")
+        elif a in ['ADD', 'SUB', 'AND', 'OR', 'SLT', 'MUL']:
+            machine_code = r_Type(instruction[i], machine_code)
+        elif a == 'HLT':
+            machine_code = HALT_Instruction(instruction[i], machine_code)
+        elif a in ['ADDI', 'SUBI', 'SLTI']:
+            machine_code = i_Type_Arithmetic(instruction[i], machine_code)
+        elif a in ['LW', 'SW']:
+            machine_code = i_Type_Memory(instruction[i], machine_code)
+        elif a in ['BEQZ', 'BNEQZ']:
+            machine_code = i_Type_Branch(instruction[i], machine_code, pc)
+        else:
+            # FIXED: Catch typos so the PC doesn't get misaligned!
+            raise ValueError(f"Syntax Error: Unrecognized instruction '{a}' at PC {pc}")
+
+        pc += 4 # Keep track of PC in pass 2 for branches
+
+    # Write actual binary to file
+    with open("imem_init.txt", "w") as f:
+        for binary_str in machine_code:
+            f.write(binary_str)
+
+if __name__ == "__main__":
+    try:
+        file_name = input("Enter the file name: ")
+        main(file_name)
+        print("Success! Machine code written to 'imem_init.txt'")
+    except FileNotFoundError:
+        print("Error: Could not find file")
+    except KeyError as e:
+        print(f"Error: Unknown instruction, label, or register found: {e}")
+    except ValueError as e:
+        print(e)
